@@ -29,13 +29,13 @@ jobs:
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: $ secrets.GITHUB_TOKEN 
-          TAURI_SIGNING_PRIVATE_KEY: $ secrets.TAURI_SIGNING_PRIVATE_KEY 
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: $ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD 
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: ssbzapret
-          tagName: $ github.ref_name 
-          releaseName: "SSBZapret $ github.ref_name "
+          tagName: ${{ github.ref_name }}
+          releaseName: "SSBZapret ${{ github.ref_name }}"
           releaseBody: "Автоматическая сборка. Что нового — смотри ниже."
           releaseDraft: false
           prerelease: false
