@@ -55,7 +55,7 @@
       "endpoints": [
         "https://github.com/OWNER/REPO/releases/latest/download/latest.json"
       ],
-      "pubkey": "REPLACE_WITH_YOUR_PUBLIC_KEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdEMkQ2NjI0OTNDQjI2MjgKUldRb0pzdVRKR1l0ZlVXSUNxMGl3RUN4S1FBSjdOc3FjcUkvcWxyN1hJVjRzd1RxcVppTTNlSXMK",
       "windows": {
         "installMode": "passive"
       }
