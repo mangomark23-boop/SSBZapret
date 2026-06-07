@@ -75,6 +75,14 @@ function iconKey(v) {
 }
 function presetIcon(p) { return svgIcon(iconKey(p && p.icon)); }
 
+/* суммарное число доменов пресета: свои + встроенные правила */
+function presetDomainCount(p) {
+  if (!p) return 0;
+  let n = (p.domains || []).length;
+  if (Array.isArray(p.rules)) for (const r of p.rules) n += (r.domains || []).length;
+  return n;
+}
+
 /* ===================================================================
    BACKEND — единый интерфейс
    =================================================================== */
@@ -365,6 +373,8 @@ function syncHero() {
   const p = active();
   if (!p) return;
   if ($('hero-strat')) $('hero-strat').textContent = p.name;
+  if ($('hero-profile')) $('hero-profile').textContent = p.name;
+  if ($('st-dom') && !UI.running) $('st-dom').textContent = presetDomainCount(p);
 }
 
 /* ===================================================================
@@ -387,10 +397,14 @@ setInterval(() => {
 }, 2000);
 
 function renderStats(s) {
-  if ($('pps')) $('pps').textContent = (s.pkt_s||0).toLocaleString('ru-RU') + ' pkt/s';
-  if ($('st-pkt')) $('st-pkt').textContent = (s.processed||0).toLocaleString('ru-RU');
-  if ($('st-spd') && s.mbit) $('st-spd').innerHTML = (s.mbit) + '<u>Mbit/s</u>';
-  if ($('st-dom')) $('st-dom').textContent = s.active_domains ?? (active()?.domains.length||0);
+  const live = UI.running;
+  // В реальном режиме winws не отдаёт per-packet статистику (учёт идёт
+  // внутри процесса), поэтому при нулях показываем «активно», а не
+  // зависшие нули.
+  if ($('pps')) $('pps').textContent = s.pkt_s ? (s.pkt_s.toLocaleString('ru-RU') + ' pkt/s') : (live ? 'активно' : '0 pkt/s');
+  if ($('st-pkt')) $('st-pkt').textContent = s.processed ? s.processed.toLocaleString('ru-RU') : (live ? '—' : '0');
+  if ($('st-spd')) $('st-spd').innerHTML = s.mbit ? (s.mbit + '<u>Mbit/s</u>') : (live ? '<u>активно</u>' : '0<u>Mbit/s</u>');
+  if ($('st-dom')) $('st-dom').textContent = s.active_domains ?? presetDomainCount(active());
 }
 
 /* ===================================================================
@@ -409,7 +423,7 @@ function renderPresets() {
         <div class="sc-ic">${presetIcon(p)}</div>
         <div class="sc-meta">
           <h3>${esc(p.name)}</h3>
-          <span class="sc-sub">${p.builtin ? 'встроенный' : 'пользовательский'} · ${p.domains.length} дом.</span>
+          <span class="sc-sub">${p.builtin ? 'встроенный' : 'пользовательский'} · ${presetDomainCount(p)} дом.</span>
         </div>
         <div class="sc-check">${svgIcon('check')}</div>
       </div>
@@ -825,7 +839,7 @@ async function runAutoTest() {
   const mname = method ? ((METHODS.find(m => m.id === method) || {}).name || method) : '—';
   atStep('rec', method ? `Рекомендация: ${mname}${method!=='split'?' · TTL '+ttl:''}` : 'Обход не требуется', 'ok',
     recTxt + (prov ? ` (провайдер: ${prov.isp||'?'})` : ''));
-  if (method && TAURI) atStep('tunehint', 'Можно запустить «Автоподбор»', 'inf', 'перебор winws-профилей и выбор рабочего');
+  if (method && TAURI) atStep('tunehint', 'Можно за��устить «Автоподбор»', 'inf', 'перебор winws-профилей и выбор рабочего');
   $('at-sub').textContent = 'Готово';
 
   if (method && p) {
