@@ -141,8 +141,9 @@ fn main() {
 
     let store = Arc::new(Mutex::new(Store::load()));
     let engine = Arc::new(Engine::new());
+    let engine_exit = engine.clone();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         // Автозапуск вместе с системой (включается из настроек).
         .plugin(tauri_plugin_autostart::init(
@@ -161,11 +162,14 @@ fn main() {
                 let show = MenuItem::with_id(app, "show", "Показать", true, None::<&str>)?;
                 let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
                 let menu = Menu::with_items(app, &[&show, &quit])?;
-                TrayIconBuilder::with_id("main")
-                    .icon(app.default_window_icon().unwrap().clone())
+                let mut tray = TrayIconBuilder::with_id("main")
                     .tooltip("SSBZapret")
-                    .menu(&menu)
-                    .on_menu_event(|app, event| match event.id.as_ref() {
+                    .menu(&menu);
+                // Иконку ставим только если она есть — иначе раньше падали на unwrap().
+                if let Some(icon) = app.default_window_icon() {
+                    tray = tray.icon(icon.clone());
+                }
+                tray.on_menu_event(|app, event| match event.id.as_ref() {
                         "quit" => app.exit(0),
                         "show" => {
                             if let Some(w) = app.get_webview_window("main") {
@@ -176,6 +180,13 @@ fn main() {
                         _ => {}
                     })
                     .build(app)?;
+
+                // Автозапуск с флагом --minimized: прячем окно в трей.
+                if std::env::args().any(|a| a == "--minimized") {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
+                    }
+                }
 
                 Ok(())
             }
@@ -202,6 +213,15 @@ fn main() {
             commands::check_update,
             commands::install_update
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("ошибка при запуске SSBZapret");
+
+    // При выходе (закрытие окна или «Выход» из трея) гарантированно
+    // останавливаем движок и убиваем winws, чтобы он не висел в фоне
+    // и не конфликтовал со следующим запуском.
+    app.run(move |_app, event| match event {
+        tauri::RunEvent::ExitRequested { .. } => engine_exit.shutdown(),
+        tauri::RunEvent::Exit => engine_exit.shutdown(),
+        _ => {}
+    });
 }
