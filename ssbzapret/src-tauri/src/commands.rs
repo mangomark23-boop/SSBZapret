@@ -51,13 +51,15 @@ pub fn get_active_preset(state: State<AppState>) -> String {
 pub fn set_active_preset(preset_id: String, state: State<AppState>) -> Result<(), String> {
     let preset = {
         let mut store = state.store.lock();
-        if store.find(&preset_id).is_none() {
-            return Err(format!("пресет {preset_id} не найден"));
-        }
+        let p = store
+            .find(&preset_id)
+            .cloned()
+            .ok_or_else(|| format!("пресет {preset_id} не найден"))?;
         store.active_id = preset_id.clone();
         store.save();
-        store.find(&preset_id).cloned().unwrap()
+        p
     };
+    // hot_update перезапустит winws, если движок сейчас работает.
     state.engine.hot_update(preset);
     Ok(())
 }
@@ -215,6 +217,12 @@ pub fn autotune(preset_id: String, state: State<AppState>) -> Result<Vec<Autotun
         }
     }
 
+    // Запоминаем состояние до автоподбора, чтобы корректно восстановить его
+    // в конце (раньше движок оставался выключенным, а активный пресет —
+    // подменённым временной выборкой).
+    let was_running = state.engine.status().running;
+    let prev_active = state.store.lock().active_id.clone();
+
     let base = {
         let store = state.store.lock();
         store
@@ -222,12 +230,25 @@ pub fn autotune(preset_id: String, state: State<AppState>) -> Result<Vec<Autotun
             .cloned()
             .ok_or_else(|| format!("пресет {preset_id} не найден"))?
     };
-    let sample: Vec<String> = base
-        .effective_rules()
-        .iter()
-        .flat_map(|r| r.domains.clone())
-        .take(4)
-        .collect();
+    // Берём до 2 доменов с каждого правила (а не первые 4 из одного),
+    // чтобы покрыть все сервисы пресета «Всё сразу» (YouTube, Discord, игры).
+    let sample: Vec<String> = {
+        let mut s: Vec<String> = Vec::new();
+        for r in base.effective_rules() {
+            for d in r.domains.iter().take(2) {
+                if !s.contains(d) {
+                    s.push(d.clone());
+                }
+                if s.len() >= 10 {
+                    break;
+                }
+            }
+            if s.len() >= 10 {
+                break;
+            }
+        }
+        s
+    };
     if sample.is_empty() {
         return Err("в пресете нет доменов для проверки".into());
     }
@@ -244,8 +265,20 @@ pub fn autotune(preset_id: String, state: State<AppState>) -> Result<Vec<Autotun
         p.strategy = strat.clone();
         state.engine.log("inf", "autotune", &format!("проверка профиля: {name}"));
         state.engine.start(p);
-        thread::sleep(std::time::Duration::from_millis(2600));
-        let ok = sample.iter().filter(|d| probe_domain(d).direct_ok).count();
+        // Даём winws и драйверу WinDivert время полностью подняться,
+        // иначе первые пробы ложно «не проходят».
+        thread::sleep(std::time::Duration::from_millis(3500));
+        let ok = sample
+            .iter()
+            .filter(|d| {
+                if probe_domain(d).direct_ok {
+                    return true;
+                }
+                // одна повторная попытка — драйвер мог ещё прогреваться
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                probe_domain(d).direct_ok
+            })
+            .count();
         let level = if ok == sample.len() {
             "ok"
         } else if ok > 0 {
@@ -300,6 +333,21 @@ pub fn autotune(preset_id: String, state: State<AppState>) -> Result<Vec<Autotun
         }
     }
 
+    // Восстанавливаем движок: если он работал до автоподбора — запускаем
+    // заново ранее активный пресет (уже с подобранной стратегией, если это
+    // он и был); иначе просто синхронизируем активный пресет на дашборде.
+    let restore = {
+        let store = state.store.lock();
+        store.find(&prev_active).cloned()
+    };
+    if let Some(p) = restore {
+        if was_running {
+            state.engine.start(p);
+        } else {
+            state.engine.hot_update(p);
+        }
+    }
+
     Ok(rows)
 }
 
@@ -318,8 +366,14 @@ pub fn get_dns(state: State<AppState>) -> String {
 /// Переключить системный DNS на выбранного провайдера (или сбросить при "off").
 #[tauri::command(rename_all = "snake_case")]
 pub fn set_dns(provider_id: String, state: State<AppState>) -> Result<(), String> {
+    // Все известные IP провайдеров — чтобы при сбросе/переключении снять
+    // ранее прописанные DoH-шаблоны (иначе зашифрованный DNS ломает VPN).
+    let all_ips: Vec<String> = crate::store::dns_providers()
+        .into_iter()
+        .flat_map(|p| p.ips)
+        .collect();
     if provider_id == "off" {
-        crate::dns::clear()?;
+        crate::dns::clear(&all_ips)?;
         {
             let mut store = state.store.lock();
             store.dns_provider = "off".into();
@@ -334,6 +388,9 @@ pub fn set_dns(provider_id: String, state: State<AppState>) -> Result<(), String
         .into_iter()
         .find(|p| p.id == provider_id)
         .ok_or_else(|| format!("DNS-провайдер {provider_id} не найден"))?;
+    // Сначала снимаем прежние настройки (адреса + DoH), затем применяем новые —
+    // не накапливаем устаревшие DoH-шаблоны от других провайдеров.
+    crate::dns::clear(&all_ips)?;
     crate::dns::apply(&prov.ips, &prov.doh)?;
     {
         let mut store = state.store.lock();

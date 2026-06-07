@@ -68,11 +68,31 @@ mod imp {
     }
 
     /// Сбросить DNS на автоматический (DHCP / от провайдера).
-    pub fn clear() -> Result<(), String> {
-        let script = "$ErrorActionPreference='SilentlyContinue';\n\
-            Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses };\n\
-            Clear-DnsClientCache;\n";
-        run_ps(script)
+    ///
+    /// Дополнительно снимает DoH-шаблоны (`netsh dns ... encryption`), которые
+    /// мог добавить `apply`. Без этого зашифрованный DNS оставался прописан в
+    /// системе и мог ломать резолвинг через VPN.
+    pub fn clear(doh_ips: &[String]) -> Result<(), String> {
+        let mut script = String::from("$ErrorActionPreference='SilentlyContinue';\n");
+        for ip in doh_ips {
+            script.push_str(&format!(
+                "netsh dns delete encryption server={ip} >$null 2>&1;\n"
+            ));
+        }
+        // Сбрасываем DNS на автоматический ТОЛЬКО на тех адаптерах, где сейчас
+        // стоит один из наших провайдеров. Иначе раньше затирался DNS,
+        // который пользователь прописал вручную (VPN/корпоративный и т.п.).
+        let known = doh_ips
+            .iter()
+            .map(|i| format!("'{}'", i))
+            .collect::<Vec<_>>()
+            .join(",");
+        script.push_str(&format!("$known=@({});\n", known));
+        script.push_str(
+            "Get-NetAdapter -Physical | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { $cur=(Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4).ServerAddresses; if ($cur | Where-Object { $known -contains $_ }) { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses } };\n",
+        );
+        script.push_str("Clear-DnsClientCache;\n");
+        run_ps(&script)
     }
 }
 
@@ -82,8 +102,8 @@ pub fn apply(ips: &[String], doh: &str) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-pub fn clear() -> Result<(), String> {
-    imp::clear()
+pub fn clear(doh_ips: &[String]) -> Result<(), String> {
+    imp::clear(doh_ips)
 }
 
 #[cfg(not(windows))]
@@ -92,6 +112,6 @@ pub fn apply(_ips: &[String], _doh: &str) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-pub fn clear() -> Result<(), String> {
+pub fn clear(_doh_ips: &[String]) -> Result<(), String> {
     Ok(())
 }
