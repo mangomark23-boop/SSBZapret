@@ -4,7 +4,9 @@
 //! На остальных ОС работает симулятор — чтобы UI можно было
 //! разрабатывать без драйвера.
 
+#[allow(dead_code)]
 pub mod desync;
+#[allow(dead_code)]
 pub mod tls;
 pub mod probe;
 #[cfg(windows)]
@@ -23,8 +25,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::store::Preset;
-
-pub use desync::Method;
 
 #[derive(Clone, Serialize)]
 pub struct Status {
@@ -50,11 +50,15 @@ pub struct LogLine {
 
 pub struct Engine {
     running: AtomicBool,
+    #[allow(dead_code)]
     processed: AtomicU64,
     started_at: Mutex<Option<Instant>>,
     preset: Mutex<Option<Preset>>,
     app: Mutex<Option<AppHandle>>,
-    stop_flag: Arc<AtomicBool>,
+    stop_flag: Mutex<Arc<AtomicBool>>,
+    /// PID активного процесса winws (для синхронного завершения при выходе).
+    #[allow(dead_code)]
+    child_pid: Mutex<Option<u32>>,
 }
 
 impl Engine {
@@ -65,12 +69,48 @@ impl Engine {
             started_at: Mutex::new(None),
             preset: Mutex::new(None),
             app: Mutex::new(None),
-            stop_flag: Arc::new(AtomicBool::new(false)),
+            stop_flag: Mutex::new(Arc::new(AtomicBool::new(false))),
+            child_pid: Mutex::new(None),
         }
     }
 
     pub fn attach(&self, app: AppHandle) {
         *self.app.lock() = Some(app);
+    }
+
+    /// Клон AppHandle для фоновых потоков (трансляция вывода winws и т.п.).
+    pub fn app_handle(&self) -> Option<AppHandle> {
+        self.app.lock().clone()
+    }
+
+    /// Запоминает PID запущенного winws (сбрасывается при остановке).
+    #[allow(dead_code)]
+    pub fn set_child_pid(&self, pid: Option<u32>) {
+        *self.child_pid.lock() = pid;
+    }
+
+    /// Сбрасывает сохранённый PID, только если он совпадает с переданным —
+    /// чтобы старый воркер при быстром перезапуске не затёр PID нового winws.
+    #[allow(dead_code)]
+    pub fn clear_child_pid_if(&self, pid: u32) {
+        let mut g = self.child_pid.lock();
+        if *g == Some(pid) {
+            *g = None;
+        }
+    }
+
+    /// Полная остановка при выходе из приложения: помечаем стоп и синхронно
+    /// убиваем winws, чтобы процесс не остался висеть в фоне (иначе при
+    /// следующем запуске поднимался второй winws и обход ломался).
+    pub fn shutdown(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        self.stop_flag.lock().store(true, Ordering::SeqCst);
+        #[cfg(windows)]
+        {
+            if let Some(pid) = self.child_pid.lock().take() {
+                winws::kill_pid(pid);
+            }
+        }
     }
 
     /// Папка ресурсов приложения (где лежат WinDivert.dll / .sys).
@@ -104,10 +144,12 @@ impl Engine {
         }
     }
 
+    #[allow(dead_code)]
     pub fn note_processed(&self, n: u64) {
         self.processed.fetch_add(n, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn total_processed(&self) -> u64 {
         self.processed.load(Ordering::Relaxed)
     }
@@ -167,6 +209,8 @@ impl Engine {
     pub fn hot_update(self: &Arc<Self>, preset: Preset) {
         let running = self.running.load(Ordering::SeqCst);
         *self.preset.lock() = Some(preset.clone());
+        // Сообщаем фронтенду об изменении активного пресета (обновляет дашборд).
+        self.emit_status();
         if running {
             self.log(
                 "inf",

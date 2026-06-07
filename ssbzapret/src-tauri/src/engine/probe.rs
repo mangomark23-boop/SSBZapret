@@ -43,6 +43,25 @@ fn build_client_hello(sni: &str) -> (Vec<u8>, usize) {
     let ext_body_start = ext.len();
     ext.extend_from_slice(&sni_body);
 
+    // Расширение ALPN (h2, http/1.1). Без него многие серверы и CDN
+    // отвечают TLS-alert даже на доступный домен — probe ложно считал его
+    // заблокированным. ALPN добавляется ПОСЛЕ server_name, поэтому позиция
+    // SNI (sni_pos ниже) не меняется.
+    {
+        let protos: [&[u8]; 2] = [b"h2", b"http/1.1"];
+        let mut list = Vec::new();
+        for p in protos {
+            list.push(p.len() as u8);
+            list.extend_from_slice(p);
+        }
+        let mut alpn_body = Vec::new();
+        alpn_body.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        alpn_body.extend_from_slice(&list);
+        ext.extend_from_slice(&16u16.to_be_bytes()); // тип расширения = ALPN (0x0010)
+        ext.extend_from_slice(&(alpn_body.len() as u16).to_be_bytes());
+        ext.extend_from_slice(&alpn_body);
+    }
+
     // Тело ClientHello.
     let cipher_bytes: Vec<u8> = vec![0xc0, 0x2f, 0xc0, 0x30, 0x00, 0x9c, 0x00, 0x2f];
     let mut hello = Vec::new();

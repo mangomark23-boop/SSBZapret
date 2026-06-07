@@ -12,8 +12,50 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use super::{Engine, Stats};
+use tauri::{AppHandle, Emitter};
+
+use super::{Engine, LogLine, Stats};
 use crate::store::{Preset, Rule, Strategy};
+
+/// Перенаправляет поток вывода winws (stdout/stderr) в журнал приложения.
+/// Без этого причина «обход не работает» (ошибка открытия hostlist,
+/// проблема с WinDivert и т.п.) оставалась невидимой.
+fn pipe_logs<R: std::io::Read + Send + 'static>(app: AppHandle, mut reader: R, level: &'static str) {
+    thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        let mut line: Vec<u8> = Vec::new();
+        let emit = |bytes: &[u8]| {
+            // winws (cygwin) пишет в CP866/CP1251 — читаем байты и декодируем
+            // «без потерь», иначе BufReader::lines() обрывался на первой
+            // не-UTF8 строке и журнал замолкал.
+            let s = String::from_utf8_lossy(bytes);
+            let s = s.trim();
+            if !s.is_empty() {
+                let _ = app.emit(
+                    "engine://log",
+                    LogLine { level: level.into(), tag: "winws".into(), msg: s.to_string() },
+                );
+            }
+        };
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    for &b in &chunk[..n] {
+                        if b == b'\n' {
+                            emit(&line);
+                            line.clear();
+                        } else if b != b'\r' {
+                            line.push(b);
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        emit(&line);
+    });
+}
 
 /// Не показывать консольное окно winws.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -99,11 +141,30 @@ pub fn build_args(rules: &[(Rule, PathBuf)]) -> Vec<String> {
     args
 }
 
-/// Записывает hostlist правила в %APPDATA%/SSBZapret/hostlists/<preset>__<rule>.txt.
-fn write_rule_hostlist(preset_id: &str, rule: &Rule) -> Result<PathBuf, String> {
+/// Папка для hostlist-файлов.
+///
+/// ВАЖНО: используем ASCII-путь %ProgramData%\SSBZapret, не зависящий от
+/// имени пользователя. Если имя профиля содержит кириллицу (например
+/// «Администратор»), winws (cygwin) не может открыть путь к hostlist —
+/// домены не подхватываются и обход молча не срабатывает.
+fn hostlist_dir() -> PathBuf {
+    if let Ok(pd) = std::env::var("ProgramData") {
+        if !pd.trim().is_empty() {
+            let mut p = PathBuf::from(pd);
+            p.push("SSBZapret");
+            p.push("hostlists");
+            return p;
+        }
+    }
     let mut dir = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     dir.push("SSBZapret");
     dir.push("hostlists");
+    dir
+}
+
+/// Записывает hostlist правила в <hostlist_dir>/<preset>__<rule>.txt.
+fn write_rule_hostlist(preset_id: &str, rule: &Rule) -> Result<PathBuf, String> {
+    let mut dir = hostlist_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("не удалось создать папку hostlist: {e}"))?;
     dir.push(format!("{}__{}.txt", preset_id, rule.id));
     let body = rule.domains.join("\n");
@@ -136,11 +197,19 @@ fn spawn(exe: &Path, args: &[String]) -> Result<Child, String> {
     Command::new(exe)
         .args(args)
         .current_dir(dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("не удалось запустить winws.exe: {e}"))
+}
+
+/// Синхронно убивает дерево процессов winws по PID (вызывается при выходе/остановке).
+pub fn kill_pid(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
 }
 
 /// Основной запуск: держит winws живым, пока не выставлен stop_flag.
@@ -165,27 +234,46 @@ pub fn run(engine: &Engine, preset: &Preset, stop_flag: &AtomicBool) -> Result<(
     engine.log("inf", "winws", &format!("аргументы: winws {}", args.join(" ")));
 
     let mut child = spawn(&exe, &args)?;
-    engine.log("ok", "winws", &format!("winws запущен (PID {})", child.id()));
+    let pid = child.id();
+    engine.set_child_pid(Some(pid));
+    engine.log("ok", "winws", &format!("winws запущен (PID {})", pid));
+
+    // Транслируем вывод winws в журнал приложения (диагностика обхода).
+    if let Some(app) = engine.app_handle() {
+        if let Some(out) = child.stdout.take() {
+            pipe_logs(app.clone(), out, "inf");
+        }
+        if let Some(err) = child.stderr.take() {
+            pipe_logs(app, err, "warn");
+        }
+    }
 
     loop {
         if stop_flag.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
+            engine.clear_child_pid_if(pid);
             engine.log("warn", "winws", "winws остановлен");
             break;
         }
         match child.try_wait() {
             Ok(Some(status)) => {
+                engine.clear_child_pid_if(pid);
                 engine.log("err", "winws", &format!("winws завершился неожиданно: {status}"));
                 return Err(format!("winws завершился ({status})"));
             }
             Ok(None) => {}
-            Err(e) => return Err(format!("ошибка ожидания winws: {e}")),
+            Err(e) => {
+                engine.clear_child_pid_if(pid);
+                return Err(format!("ошибка ожидания winws: {e}"));
+            }
         }
-        engine.note_processed(1);
+        // Реальный per-packet учёт идёт внутри winws и наружу не выдаётся,
+        // поэтому фейковые pps/Mbit не эмитим — отдаём только число активных
+        // доменов; дашборд показывает «активно» вместо нулей.
         engine.emit_runtime_stats(Stats {
             pkt_s: 0,
-            processed: engine.total_processed(),
+            processed: 0,
             active_domains: total_domains,
             mbit: 0,
         });
