@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SSBZapret",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "identifier": "com.ssb.zapret",
   "build": {
     "frontendDist": "../src"
@@ -53,7 +53,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/OWNER/REPO/releases/latest/download/latest.json"
+        "https://github.com/mangomark23-boop/SSBZapret/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdEMkQ2NjI0OTNDQjI2MjgKUldRb0pzdVRKR1l0ZlVXSUNxMGl3RUN4S1FBSjdOc3FjcUkvcWxyN1hJVjRzd1RxcVppTTNlSXMK",
       "windows": {

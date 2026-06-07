@@ -1,6 +1,6 @@
 [package]
 name = "ssbzapret"
-version = "0.1.0"
+version = "0.2.1"
 description = "SSBZapret — утилита обхода DPI (Stronger · Smarter · Better)"
 authors = ["mark"]
 edition = "2021"
