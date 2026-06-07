@@ -178,7 +178,10 @@ impl Engine {
         *self.preset.lock() = Some(preset.clone());
         *self.started_at.lock() = Some(Instant::now());
         self.running.store(true, Ordering::SeqCst);
-        self.stop_flag.store(false, Ordering::SeqCst);
+        // Свежий stop_flag на каждый запуск: если старый воркер ещё
+        // догорает, он держит свою копию и не уронит новый запуск.
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        *self.stop_flag.lock() = stop_flag.clone();
         self.emit_status();
         self.log(
             "ok",
@@ -190,7 +193,6 @@ impl Engine {
         );
 
         let this = self.clone();
-        let stop_flag = self.stop_flag.clone();
         thread::spawn(move || {
             this.worker(preset, stop_flag);
         });
@@ -198,7 +200,15 @@ impl Engine {
 
     pub fn stop(&self) {
         if self.running.swap(false, Ordering::SeqCst) {
-            self.stop_flag.store(true, Ordering::SeqCst);
+            self.stop_flag.lock().store(true, Ordering::SeqCst);
+            // Синхронно валим winws по PID, чтобы процесс не пережил
+            // остановку (иначе при быстром рестарте оставался «хвост»).
+            #[cfg(windows)]
+            {
+                if let Some(pid) = self.child_pid.lock().take() {
+                    winws::kill_pid(pid);
+                }
+            }
             *self.started_at.lock() = None;
             self.emit_status();
             self.log("warn", "engine", "движок остановлен");
@@ -208,15 +218,20 @@ impl Engine {
     /// Горячее обновление списка доменов/стратегии без полного рестарта.
     pub fn hot_update(self: &Arc<Self>, preset: Preset) {
         let running = self.running.load(Ordering::SeqCst);
-        *self.preset.lock() = Some(preset.clone());
-        // Сообщаем фронтенду об изменении активного пресета (обновляет дашборд).
-        self.emit_status();
         if running {
+            // winws не перечитывает аргументы на лету, поэтому делаем
+            // полный перезапуск с новым пресетом — иначе правки доменов/
+            // стратегии молча не применяются (баг #2).
             self.log(
                 "inf",
                 "engine",
-                &format!("обновлён список доменов ({})", preset.domains.len()),
+                &format!("перезапуск с новым пресетом ({})", preset.name),
             );
+            self.start(preset);
+        } else {
+            *self.preset.lock() = Some(preset.clone());
+            // Обновляем активный пресет на дашборде.
+            self.emit_status();
         }
     }
 
